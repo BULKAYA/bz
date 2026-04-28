@@ -246,6 +246,79 @@
         </form> <!-- FORM BİTİŞİ -->
     </div>
 
+    <div class="max-w-full mx-auto bg-white rounded-lg shadow-md mt-6 p-4 sm:p-6">
+        <h2 class="text-xl font-bold text-gray-800">Spec-Driven Synthetic Data Factory</h2>
+        <p class="text-sm text-gray-600 mt-2">Akış: <b>Methods/Results → Evidence Register → Calibration/Validation Targets → Generator Spec → Synthetic Dataset</b>. Sessiz varsayım yok; tüm eksikler assumptions kaydına yazılır.</p>
+
+        <div class="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+                <label for="methods_text" class="font-semibold text-sm text-gray-700">Methods (ham metin)</label>
+                <textarea id="methods_text" rows="7" class="mt-1" placeholder="Örn: Hierarchical clustering with Ward linkage, dendrogram cut, MCAR missingness..."></textarea>
+            </div>
+            <div>
+                <label for="results_text" class="font-semibold text-sm text-gray-700">Results (ham metin)</label>
+                <textarea id="results_text" rows="7" class="mt-1" placeholder="Örn: n=124, mean age=14.2±2.8, female=62%, corr(x,y)=0.48..."></textarea>
+            </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+                <label for="data_dictionary" class="font-semibold text-sm text-gray-700">data_dictionary.yaml (JSON formatında)</label>
+                <textarea id="data_dictionary" rows="13" class="mt-1 font-mono text-xs">{
+  "dataset": {
+    "study_id": "article_001",
+    "n": 120,
+    "seed": 20260428,
+    "claim_level": "observational_equivalence"
+  },
+  "variables": [
+    {"name":"participant_id","type":"id","generation":{"family":"sequence","params":{"prefix":"SYN","width":4}}},
+    {"name":"study_n","type":"integer","source":"results","patterns":["n\\s*=\\s*(\\d+)"]},
+    {"name":"mean_age","type":"float","source":"results","patterns":["mean\\s*age\\s*=\\s*(\\d+[\\.,]?\\d*)"]},
+    {"name":"female_ratio","type":"float","source":"results","patterns":["female\\s*=\\s*(\\d+[\\.,]?\\d*)%"],"transform":"percent_to_ratio"},
+    {"name":"binary_coding_used","type":"binary","source":"methods","keywords":["binary","dummy coding","one-hot"],"default":0},
+    {"name":"clustering_method","type":"categorical","source":"methods","keywords":["ward","hierarchical clustering"],"assign":"ward","default":"unspecified"},
+    {"name":"dendrogram_used","type":"binary","source":"methods","keywords":["dendrogram"],"default":0}
+  ]
+}</textarea>
+            </div>
+            <div>
+                <label for="assumptions_spec" class="font-semibold text-sm text-gray-700">assumptions.yaml (JSON formatında)</label>
+                <textarea id="assumptions_spec" rows="13" class="mt-1 font-mono text-xs">{
+  "assumptions": [
+    {"id":"A01","text":"Matched moments ≠ matched mechanism","required":true},
+    {"id":"A02","text":"Calibration ve validation hedefleri ayrıdır","required":true},
+    {"id":"A03","text":"PSD olmayan korelasyonlarda eigenvalue clipping uygulanır","required":true}
+  ]
+}</textarea>
+            </div>
+        </div>
+
+        <div class="flex flex-wrap gap-3 mt-4">
+            <button id="extract-evidence" type="button" class="bg-slate-600 hover:bg-slate-700 text-white font-bold py-2 px-4 rounded-lg">1) Evidence Çıkar</button>
+            <button id="compile-targets" type="button" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg">2) Target Derle</button>
+            <button id="build-spec" type="button" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">3) Spec Oluştur</button>
+            <button id="build-dataset" type="button" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded-lg">4) Sentetik Veri Üret</button>
+            <button id="copy-json" type="button" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">📋 Bundle Kopyala</button>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+                <label for="evidence_output" class="font-semibold text-sm text-gray-700">evidence_register.jsonl</label>
+                <textarea id="evidence_output" rows="9" class="mt-1 font-mono text-xs" readonly></textarea>
+            </div>
+            <div>
+                <label for="targets_output" class="font-semibold text-sm text-gray-700">calibration + validation targets</label>
+                <textarea id="targets_output" rows="9" class="mt-1 font-mono text-xs" readonly></textarea>
+            </div>
+        </div>
+
+        <div class="mt-4">
+            <label for="generated_dataset" class="font-semibold text-sm text-gray-700">generator_spec + synthetic_dataset bundle (JSON)</label>
+            <textarea id="generated_dataset" rows="12" class="mt-1 font-mono text-xs" readonly></textarea>
+        </div>
+    </div>
+
     <!-- Yükleniyor Modalı -->
     <div id="loading-modal">
         <div class="modal-content text-center">
@@ -269,6 +342,243 @@
     const resultModal = document.getElementById('result-modal');
     const closeModalButton = document.getElementById('close-modal-button');
     const resultText = document.getElementById('result-text');
+
+
+    const extractEvidenceButton = document.getElementById('extract-evidence');
+    const compileTargetsButton = document.getElementById('compile-targets');
+    const buildSpecButton = document.getElementById('build-spec');
+    const buildDatasetButton = document.getElementById('build-dataset');
+    const copyJsonButton = document.getElementById('copy-json');
+
+    const methodsText = document.getElementById('methods_text');
+    const resultsText = document.getElementById('results_text');
+    const dictionaryInput = document.getElementById('data_dictionary');
+    const assumptionsInput = document.getElementById('assumptions_spec');
+
+    const evidenceOutput = document.getElementById('evidence_output');
+    const targetsOutput = document.getElementById('targets_output');
+    const generatedDataset = document.getElementById('generated_dataset');
+
+    const parseNumber = (value) => Number(String(value).replace(',', '.'));
+
+    const safeJsonParse = (text, label) => {
+        try {
+            return JSON.parse(text);
+        } catch (error) {
+            throw new Error(`${label} JSON parse hatası: ${error.message}`);
+        }
+    };
+
+    const detectKeywords = (text, keywords = []) => {
+        const normalized = (text || '').toLowerCase();
+        return keywords.some((kw) => normalized.includes(String(kw).toLowerCase()));
+    };
+
+    const extractByPatterns = (text, patterns = []) => {
+        for (const pattern of patterns) {
+            const regex = new RegExp(pattern, 'i');
+            const match = text.match(regex);
+            if (match?.[1]) return match[1];
+        }
+        return null;
+    };
+
+    const normalizeEvidence = () => {
+        const methods = methodsText.value || '';
+        const results = resultsText.value || '';
+
+        const evidence = [];
+        const pushEvidence = (type, value, source, confidence = 0.85) => {
+            if (value === null || value === undefined || value === '') return;
+            evidence.push({ type, value, source, confidence });
+        };
+
+        pushEvidence('sample_size', extractByPatterns(results, ['n\\s*=\\s*(\\d+)']), 'results.inline');
+        pushEvidence('mean_age', extractByPatterns(results, ['mean\\s*age\\s*=\\s*(\\d+[\\.,]?\\d*)']), 'results.inline');
+        pushEvidence('female_percent', extractByPatterns(results, ['female\\s*=\\s*(\\d+[\\.,]?\\d*)%']), 'results.inline');
+        pushEvidence('corr_generic', extractByPatterns(results, ['corr\\([^)]*\\)\\s*=\\s*([+-]?\\d+[\\.,]?\\d*)']), 'results.inline');
+        pushEvidence('ward_detected', detectKeywords(methods, ['ward', 'hierarchical clustering']) ? 1 : 0, 'methods.keyword', 0.95);
+        pushEvidence('dendrogram_detected', detectKeywords(methods, ['dendrogram']) ? 1 : 0, 'methods.keyword', 0.95);
+        pushEvidence('binary_coding_detected', detectKeywords(methods, ['binary', 'dummy coding', 'one-hot']) ? 1 : 0, 'methods.keyword', 0.95);
+        pushEvidence('mcar_detected', detectKeywords(methods, ['mcar']) ? 1 : 0, 'methods.keyword', 0.8);
+
+        return evidence;
+    };
+
+    const buildTargets = (evidence) => {
+        const byType = Object.fromEntries(evidence.map((e) => [e.type, e.value]));
+
+        const calibration = [];
+        const validation = [];
+
+        if (byType.sample_size) {
+            calibration.push({ id: 'T001', statistic: 'n', variable: 'study_n', value: Number(byType.sample_size), tolerance: 0, weight: 1.0, source: 'results.inline.n' });
+        }
+        if (byType.mean_age) {
+            calibration.push({ id: 'T002', statistic: 'mean', variable: 'mean_age', value: parseNumber(byType.mean_age), tolerance: 0.25, weight: 1.0, source: 'results.inline.mean_age' });
+        }
+        if (byType.female_percent) {
+            calibration.push({ id: 'T003', statistic: 'proportion', variable: 'female_ratio', value: parseNumber(byType.female_percent) / 100, tolerance: 0.03, weight: 1.0, source: 'results.inline.female_percent' });
+        }
+
+        if (byType.corr_generic) {
+            validation.push({ id: 'V001', statistic: 'correlation', variables: ['x', 'y'], value: parseNumber(byType.corr_generic), tolerance: 0.08, source: 'results.inline.corr' });
+        }
+        validation.push({ id: 'V002', statistic: 'binary_feature_presence', variable: 'dendrogram_used', expected: byType.dendrogram_detected ? 1 : 0, source: 'methods.keyword' });
+
+        return { calibration_targets: calibration, validation_targets: validation };
+    };
+
+    const pickSourceText = (source) => (source === 'methods' ? methodsText.value || '' : resultsText.value || '');
+
+    const castValue = (rawValue, spec) => {
+        if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+        if (spec.transform === 'percent_to_ratio') return parseNumber(rawValue) / 100;
+        if (spec.type === 'integer') return Math.round(parseNumber(rawValue));
+        if (spec.type === 'float') return parseNumber(rawValue);
+        if (spec.type === 'binary') return Number(Boolean(rawValue));
+        return rawValue;
+    };
+
+    const applyDictionary = (dictionary) => {
+        const row = {};
+        const vars = dictionary.variables || [];
+
+        vars.forEach((spec, index) => {
+            let value = null;
+            const sourceText = pickSourceText(spec.source);
+
+            if (spec.type === 'id' && spec.generation?.family === 'sequence') {
+                const prefix = spec.generation?.params?.prefix || 'SYN';
+                const width = spec.generation?.params?.width || 4;
+                value = `${prefix}${String(index + 1).padStart(width, '0')}`;
+            } else if (spec.type === 'binary' && spec.keywords) {
+                value = detectKeywords(sourceText, spec.keywords) ? 1 : 0;
+            } else if (spec.assign && spec.keywords && detectKeywords(sourceText, spec.keywords)) {
+                value = spec.assign;
+            } else if (spec.patterns) {
+                value = castValue(extractByPatterns(sourceText, spec.patterns), spec);
+            }
+
+            if (value === null && Object.prototype.hasOwnProperty.call(spec, 'default')) {
+                value = spec.default;
+            }
+
+            row[spec.name] = value;
+        });
+
+        return row;
+    };
+
+    const buildGeneratorSpec = (dictionary, assumptions, targets) => {
+        const seed = dictionary.dataset?.seed || 20260428;
+        const n = dictionary.dataset?.n || 100;
+        const claim = dictionary.dataset?.claim_level || 'observational_equivalence';
+
+        return {
+            study: {
+                study_id: dictionary.dataset?.study_id || 'unknown_study',
+                n,
+                seed,
+                claim_level: claim
+            },
+            model: {
+                family: 'gaussian_copula',
+                rationale: 'Methods/Results only; mechanism-aware constraints are not fully identified.',
+                psd_policy: { method: 'eigenvalue_clipping', epsilon: 1e-8 }
+            },
+            assumptions: assumptions.assumptions || [],
+            calibration_targets: targets.calibration_targets,
+            validation_targets: targets.validation_targets
+        };
+    };
+
+    const state = {
+        evidence: [],
+        targets: { calibration_targets: [], validation_targets: [] },
+        bundle: null
+    };
+
+    extractEvidenceButton?.addEventListener('click', () => {
+        try {
+            state.evidence = normalizeEvidence();
+            evidenceOutput.value = state.evidence.map((e) => JSON.stringify(e)).join('\n');
+        } catch (error) {
+            evidenceOutput.value = `Hata: ${error.message}`;
+        }
+    });
+
+    compileTargetsButton?.addEventListener('click', () => {
+        try {
+            if (!state.evidence.length) state.evidence = normalizeEvidence();
+            state.targets = buildTargets(state.evidence);
+            targetsOutput.value = JSON.stringify(state.targets, null, 2);
+        } catch (error) {
+            targetsOutput.value = `Hata: ${error.message}`;
+        }
+    });
+
+    buildSpecButton?.addEventListener('click', () => {
+        try {
+            const dictionary = safeJsonParse(dictionaryInput.value, 'data_dictionary');
+            const assumptions = safeJsonParse(assumptionsInput.value, 'assumptions');
+            if (!state.evidence.length) state.evidence = normalizeEvidence();
+            if (!state.targets.calibration_targets.length && !state.targets.validation_targets.length) {
+                state.targets = buildTargets(state.evidence);
+            }
+
+            const spec = buildGeneratorSpec(dictionary, assumptions, state.targets);
+            generatedDataset.value = JSON.stringify({ generator_spec: spec }, null, 2);
+        } catch (error) {
+            generatedDataset.value = `Hata: ${error.message}`;
+        }
+    });
+
+    buildDatasetButton?.addEventListener('click', () => {
+        try {
+            const dictionary = safeJsonParse(dictionaryInput.value, 'data_dictionary');
+            const assumptions = safeJsonParse(assumptionsInput.value, 'assumptions');
+
+            if (!state.evidence.length) state.evidence = normalizeEvidence();
+            if (!state.targets.calibration_targets.length && !state.targets.validation_targets.length) {
+                state.targets = buildTargets(state.evidence);
+            }
+
+            const generatorSpec = buildGeneratorSpec(dictionary, assumptions, state.targets);
+            const row = applyDictionary(dictionary);
+
+            state.bundle = {
+                metadata: {
+                    schema_version: '2.0',
+                    generated_at: new Date().toISOString(),
+                    claim_level: generatorSpec.study.claim_level,
+                    note: 'Calibration and validation are separated to reduce Goodhart leakage.'
+                },
+                evidence_register: state.evidence,
+                targets: state.targets,
+                generator_spec: generatorSpec,
+                rows: [row]
+            };
+
+            evidenceOutput.value = state.evidence.map((e) => JSON.stringify(e)).join('\n');
+            targetsOutput.value = JSON.stringify(state.targets, null, 2);
+            generatedDataset.value = JSON.stringify(state.bundle, null, 2);
+        } catch (error) {
+            generatedDataset.value = `Hata: ${error.message}`;
+        }
+    });
+
+    copyJsonButton?.addEventListener('click', async () => {
+        if (!generatedDataset.value) return;
+        try {
+            await navigator.clipboard.writeText(generatedDataset.value);
+            copyJsonButton.textContent = '✅ Kopyalandı';
+            setTimeout(() => { copyJsonButton.textContent = '📋 Bundle Kopyala'; }, 1200);
+        } catch (error) {
+            copyJsonButton.textContent = '⚠️ Kopyalanamadı';
+            setTimeout(() => { copyJsonButton.textContent = '📋 Bundle Kopyala'; }, 1200);
+        }
+    });
 
     generateButton.addEventListener('click', async () => {
         loadingModal.style.display = 'block';
@@ -340,7 +650,7 @@
 
         try {
             const apiKey = "";
-            const apiUrl = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}\`;
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
 
             const payload = {
                 contents: [{ parts: [{ text: userQuery }] }],
@@ -354,7 +664,7 @@
             });
 
             if (!response.ok) {
-                throw new Error(\`API isteği başarısız oldu: ${response.status}\`);
+                throw new Error(`API isteği başarısız oldu: ${response.status}`);
             }
 
             const result = await response.json();
@@ -368,7 +678,7 @@
 
         } catch (error) {
             console.error('Hata:', error);
-            resultText.textContent = \`Bir hata oluştu: ${error.message}\`;
+            resultText.textContent = `Bir hata oluştu: ${error.message}`;
         } finally {
             loadingModal.style.display = 'none';
             resultModal.style.display = 'block';
