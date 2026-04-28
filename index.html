@@ -246,6 +246,43 @@
         </form> <!-- FORM BİTİŞİ -->
     </div>
 
+    <div class="max-w-full mx-auto bg-white rounded-lg shadow-md mt-6 p-4 sm:p-6">
+        <h2 class="text-xl font-bold text-gray-800">Makale Metod/Resultstan Veri Seti Üretici (Beta)</h2>
+        <p class="text-sm text-gray-600 mt-2">Her makale için Method ve Results metnini girin. Veri sözlüğüne göre alanlar otomatik atanır; binary kodlar ve Ward kümeleme girdileri standartlaştırılır.</p>
+        <div class="grid md:grid-cols-2 gap-4 mt-4">
+            <div>
+                <label for="methods_text" class="font-semibold text-sm text-gray-700">Methods</label>
+                <textarea id="methods_text" rows="8" class="mt-1" placeholder="Örn: Hierarchical clustering with Ward linkage was applied. Binary encoding was used..."></textarea>
+            </div>
+            <div>
+                <label for="results_text" class="font-semibold text-sm text-gray-700">Results</label>
+                <textarea id="results_text" rows="8" class="mt-1" placeholder="Örn: n=124, mean age=14.2, female=62% ..."></textarea>
+            </div>
+        </div>
+
+        <div class="mt-4">
+            <label for="data_dictionary" class="font-semibold text-sm text-gray-700">Veri Sözlüğü (JSON)</label>
+            <textarea id="data_dictionary" rows="12" class="mt-1 font-mono text-xs">[
+  {"name":"study_n","type":"integer","source":"results","patterns":["n\s*=\s*(\\d+)","sample\s*size\s*=\s*(\\d+)"]},
+  {"name":"mean_age","type":"float","source":"results","patterns":["mean\s*age\s*=\s*(\\d+[\\.,]?\\d*)"]},
+  {"name":"female_ratio","type":"float","source":"results","patterns":["female\s*=\s*(\\d+[\\.,]?\\d*)%"],"transform":"percent_to_ratio"},
+  {"name":"binary_coding_used","type":"binary","source":"methods","keywords":["binary","dummy coding","one-hot"]},
+  {"name":"clustering_method","type":"categorical","source":"methods","keywords":["ward","hierarchical clustering"],"assign":"ward"},
+  {"name":"dendrogram_used","type":"binary","source":"methods","keywords":["dendrogram"]}
+]</textarea>
+        </div>
+
+        <div class="flex gap-3 mt-4">
+            <button id="build-dataset" type="button" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">🧪 Veri Setini Üret</button>
+            <button id="copy-json" type="button" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">📋 JSON Kopyala</button>
+        </div>
+
+        <div class="mt-4">
+            <label for="generated_dataset" class="font-semibold text-sm text-gray-700">Üretilen Veri Seti (JSON)</label>
+            <textarea id="generated_dataset" rows="10" class="mt-1 font-mono text-xs" readonly></textarea>
+        </div>
+    </div>
+
     <!-- Yükleniyor Modalı -->
     <div id="loading-modal">
         <div class="modal-content text-center">
@@ -270,6 +307,94 @@
     const closeModalButton = document.getElementById('close-modal-button');
     const resultText = document.getElementById('result-text');
 
+
+    const buildDatasetButton = document.getElementById('build-dataset');
+    const copyJsonButton = document.getElementById('copy-json');
+    const methodsText = document.getElementById('methods_text');
+    const resultsText = document.getElementById('results_text');
+    const dictionaryInput = document.getElementById('data_dictionary');
+    const generatedDataset = document.getElementById('generated_dataset');
+
+    const parseNumber = (value) => Number(String(value).replace(',', '.'));
+
+    const pickTextBySource = (source) => {
+        if (source === 'methods') return methodsText.value || '';
+        return resultsText.value || '';
+    };
+
+    const extractByPatterns = (text, patterns = []) => {
+        for (const pattern of patterns) {
+            const regex = new RegExp(pattern, 'i');
+            const match = text.match(regex);
+            if (match?.[1]) return match[1];
+        }
+        return null;
+    };
+
+    const detectKeywords = (text, keywords = []) => {
+        const normalized = text.toLowerCase();
+        return keywords.some((kw) => normalized.includes(String(kw).toLowerCase()));
+    };
+
+    const castValue = (rawValue, spec) => {
+        if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+        if (spec.transform === 'percent_to_ratio') return parseNumber(rawValue) / 100;
+        if (spec.type === 'integer') return Math.round(parseNumber(rawValue));
+        if (spec.type === 'float') return parseNumber(rawValue);
+        if (spec.type === 'binary') return Number(Boolean(rawValue));
+        return rawValue;
+    };
+
+    buildDatasetButton?.addEventListener('click', () => {
+        try {
+            const dictionary = JSON.parse(dictionaryInput.value);
+            const row = {};
+
+            dictionary.forEach((spec) => {
+                const text = pickTextBySource(spec.source);
+                let value = null;
+
+                if (spec.type === 'binary' && spec.keywords) {
+                    value = detectKeywords(text, spec.keywords) ? 1 : 0;
+                } else if (spec.assign && spec.keywords && detectKeywords(text, spec.keywords)) {
+                    value = spec.assign;
+                } else if (spec.patterns) {
+                    value = castValue(extractByPatterns(text, spec.patterns), spec);
+                }
+
+                if (value === null && Object.prototype.hasOwnProperty.call(spec, 'default')) {
+                    value = spec.default;
+                }
+
+                row[spec.name] = value;
+            });
+
+            const output = {
+                metadata: {
+                    schema_version: '1.0',
+                    generated_at: new Date().toISOString(),
+                    note: 'Observational equivalence: matched summaries do not guarantee causal mechanism.'
+                },
+                rows: [row]
+            };
+
+            generatedDataset.value = JSON.stringify(output, null, 2);
+        } catch (error) {
+            generatedDataset.value = `Hata: ${error.message}`;
+        }
+    });
+
+    copyJsonButton?.addEventListener('click', async () => {
+        if (!generatedDataset.value) return;
+        try {
+            await navigator.clipboard.writeText(generatedDataset.value);
+            copyJsonButton.textContent = '✅ Kopyalandı';
+            setTimeout(() => { copyJsonButton.textContent = '📋 JSON Kopyala'; }, 1200);
+        } catch (error) {
+            copyJsonButton.textContent = '⚠️ Kopyalanamadı';
+            setTimeout(() => { copyJsonButton.textContent = '📋 JSON Kopyala'; }, 1200);
+        }
+    });
     generateButton.addEventListener('click', async () => {
         loadingModal.style.display = 'block';
 
@@ -340,7 +465,7 @@
 
         try {
             const apiKey = "";
-            const apiUrl = \`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}\`;
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
 
             const payload = {
                 contents: [{ parts: [{ text: userQuery }] }],
@@ -354,7 +479,7 @@
             });
 
             if (!response.ok) {
-                throw new Error(\`API isteği başarısız oldu: ${response.status}\`);
+                throw new Error(`API isteği başarısız oldu: ${response.status}`);
             }
 
             const result = await response.json();
@@ -368,7 +493,7 @@
 
         } catch (error) {
             console.error('Hata:', error);
-            resultText.textContent = \`Bir hata oluştu: ${error.message}\`;
+            resultText.textContent = `Bir hata oluştu: ${error.message}`;
         } finally {
             loadingModal.style.display = 'none';
             resultModal.style.display = 'block';
